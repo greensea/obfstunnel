@@ -1,0 +1,48 @@
+obfstunnel
+==========
+
+可定制的网络流量混淆代理
+
+obfstunnel 可以通过端口转发的方式将数据包进行混淆处理，以绕过防火墙。目前支持的方法有 xor 和 random。
+
+
+obfstunnel 需要运行在客户端和服务器两边。假设客户端和服务器之间有一个防火墙，用户可以在客户端处以 CLIENT 模式运行 obfstunnel，同时在服务器端以 SERVER 模式运行 obfstunnel。以 CLIENT 模式运行的 obfstunnel 需要知道服务器端 obfstunnel 监听的端口。以 SERVER 模式运行的 obfstunnel 需要知道远程主机的地址以及想要连接到的端口。obfstunnel 会把用户发送的数据转发到远程主机上。
+
+
+
+<pre>
+                             firewall
+[user] <----> [obfstunnel] <---||---> [obfstunnel] <----> [target host]
+       direct                do_obfs               direct
+</pre>
+
+
+
+## 使用示例 ##
+
+### 混淆 SSH 流量以便绕过防火墙 ###
+
+假设我们在电脑甲上，想要连接到服务器乙，但是甲乙之间有一道防火墙，防火墙拦住了 SSH 流量。使用 obfstunnel 就可以将 SSH 流量伪装成其他的流量，绕过防火墙的拦截。
+
+在这个例子中，我们使用 obfstunnel 内建的 xor 方法，这个方法会将数据包的每个字节与 0xFF 做一个异或操作，这样就可以绕过防火墙对 SSH 流量的拦截了。obfstunnel 内建的另一个 random 方法会将数据包伪装成看起来像是随机的数据流。
+
+在服务器乙上，以 SERVER 模式运行 obfstunnel：
+
+    obfstunnel -s 2000 -t localhost:22 -m xor
+
+__-s 2000__ 意思是以 SERVER 模式运行，并监听在 2000 端口。
+
+__-t localhost:22__ 的意思是将流量转发到 localhost:22，也就是本地主机（即服务器乙）的 SSH 端口。
+
+__-m xor__ 使用 xor 混淆方法。
+
+在电脑甲上，以 CLIENT 模式运行 obfstunnel：
+
+    obfstunnel -c 22 -t 1.1.1.1:2000 -m xor
+
+__-c 22__ 让 obfstunnel 以 CLIENT 模式运行，并在 22 端口进行监听，等待用户连接。
+
+__-t 1.1.1.1:2000__ 让 obfstunnel 混淆过的数据包发送到 1.1.1.1:2000，也就是服务器乙所在的主机。2000 端口是服务器上 obfstunnel 监听的端口。
+
+最后，运行 _ssh localhost_ 你会发现虽然连接的是 localhost，但实际上你已经连接到服务器乙上了。
+
