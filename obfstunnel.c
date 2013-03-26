@@ -16,6 +16,7 @@
 #include <sys/wait.h>
 
 #include "obfstunnel.h"
+#include "udpsession.h"
 
 /// Configuration variables to obfs core
 static int otcfg_side = 0;
@@ -797,10 +798,188 @@ int ot_listen_tcp(int fsd, int lisport) {
 	return 0;
 }
 
-int ot_tunneling_udp(int lfd) {
-	int tfd, ret;
+/**
+ * Convert IP address or domain name and port into struct sockaddr_in
+ */
+struct sockaddr_in addr_parse(char* ip, int port) {
 	struct sockaddr_in taddr;
+	int ret;
+	
+	memset(&taddr, 0x00, sizeof(taddr));
+	
+	taddr.sin_family = AF_INET;
+	taddr.sin_port = htons(otcfg_target_port);
+	ret = inet_aton(ip, &taddr.sin_addr);
+	if (ret == 0) {
+		char* ipstr = NULL;
+
+		OT_LOGI("Resolving domain name `%s'\n", otcfg_target_host);
+		
+		ipstr = dns_query(ip, NULL);
+		if (ipstr == NULL) {
+			OT_LOGE("Could not resolve domain `%s'\n", otcfg_target_host);
+		}
+		else {
+			OT_LOGI("Resolved domain: %s --> %s\n", otcfg_target_host, ipstr);
+		}
+		
+		inet_aton(ipstr, &taddr.sin_addr);
+	}
+
+	return taddr;
+}
+
+int ot_tunneling_udp_client(int lfd) {
+	fd_set initfds;
+	fd_set rfds;
+	int fd, nfds, ret, rcvlen;
+	unsigned char rcvbuf[65535];	/// Maxinum of UDP packet size is 65535
+	udp_session_t* s;
+	struct sockaddr_in caddr;	/// Client address
+	struct sockaddr_in raddr;	/// Remote host address
+	socklen_t raddr_len;
+	socklen_t caddr_len;
+	
+	/// 1. Waiting client data or server data
+	/// 2. Tunneling data
+	/// 	2.1 Got cilent data
+	/// 		2.1.1 Client is newly connected
+	/// 			2.1.1.1 Create an UDP session for it, then
+	/// 			2.1.1.2 Add relate fd to fdset, then
+	/// 			2.1.1.3 Tunneling data.
+	/// 		2.1.2 Client is exists in UDP session, just tunneling data
+	/// 	2.2 Got server data, get the related client addr, then tunneling data
+	
+	FD_ZERO(&initfds);
+	FD_SET(lfd, &initfds);
+	nfds = lfd;
+	
+	while (1) {
+		rfds = initfds;
+		
+		ret = select(nfds + 1, &rfds, NULL, NULL, NULL);
+		if (ret == -1) {
+			OT_LOGE("select() error: %s\n", strerror(errno));
+			return -1;
+		}
+		else if (ret == 0) {
+			OT_LOGW("select() timed out\n");
+			continue;
+		}
+		
+		if (FD_ISSET(lfd, &rfds)) {
+			/// 在监听端口收到数据
+			rcvlen = recvfrom(lfd, rcvbuf, sizeof(rcvbuf), 0, (struct sockaddr*)&caddr, &caddr_len);
+			if (rcvlen > 0) {
+				OT_LOGD("Recived %d bytes from client %s:%d\n", rcvlen, inet_ntoa(caddr.sin_addr), ntohs(caddr.sin_port));
+			}
+			else if (rcvlen == 0) {
+				OT_LOGD("Client listen connection broken\n");
+				return 0;
+			}
+			else {
+				OT_LOGE("recvfrom() fail: %s\n", strerror(errno));
+			}
+			
+			s = udps_search_byladdr(caddr);
+			if (s == NULL) {
+				/// UDP Session is not exists
+				udp_session_t stmp;
+				
+				stmp.laddr = caddr;
+				stmp.laddr_len = sizeof(stmp.laddr);
+				stmp.raddr = addr_parse(otcfg_target_host, otcfg_target_port);
+				stmp.raddr_len = sizeof(stmp.raddr);
+				
+				/// Connect to remote
+				stmp.fd = socket(AF_INET, SOCK_DGRAM, 0);
+				if (stmp.fd < 0) {
+					OT_LOGE("socket() fail while connecting to target host: %s\n", strerror(errno));
+					continue;
+				}
+				ret = connect(stmp.fd, (struct sockaddr*)&stmp.raddr, stmp.raddr_len);
+				if (ret < 0) {
+					OT_LOGE("connect() fail while connecting to target host: %s\n", strerror(errno));
+					continue;
+				}
+				
+				/// Add to UDP session
+				s = udps_add(stmp);
+				if (s == NULL) {
+					OT_LOGE("Can't add %s:%d to UDP session\n", inet_ntoa(stmp.laddr.sin_addr), ntohs(stmp.laddr.sin_port));
+					continue;
+				}
+				OT_LOGD("Added %s:%d to UDP session\n", inet_ntoa(stmp.laddr.sin_addr), ntohs(stmp.laddr.sin_port));
+				
+				/// Update fdset
+				if (stmp.fd > nfds) {
+					nfds = stmp.fd;
+				}
+				FD_SET(stmp.fd, &initfds);
+			}
+			else {
+				/// UDP session exists
+				ret = sendto(s->fd, rcvbuf, rcvlen, 0, (struct sockaddr*)&s->raddr, s->raddr_len);
+				if (ret == 0) {
+					OT_LOGI("Connection to target host %s:%d lost\n", inet_ntoa(s->raddr.sin_addr), ntohs(s->raddr.sin_port));
+				}
+				else if (ret < 0) {
+					OT_LOGD("sendto() fail: %s\n", strerror(errno));
+				}
+				else {
+					OT_LOGD("Sent %d bytes to target host %s:%d\n", ret, inet_ntoa(s->raddr.sin_addr), ntohs(s->raddr.sin_port));
+				}
+			}
+		}
+		else {
+			/// 从远程主机收到数据
+			for (fd = 0; ret <= nfds; fd++) {	/// FIXME: Should traverse UDP session rather than such bruce
+				if (!FD_ISSET(fd, &rfds) || fd == lfd) {
+					continue;
+				}
+				
+				raddr_len = sizeof(raddr);
+				rcvlen = recvfrom(fd, rcvbuf, sizeof(rcvbuf), 0, (struct sockaddr*)&raddr, &raddr_len);
+				if (rcvlen > 0) {
+					OT_LOGD("Recived %d bytes from client %s:%d\n", rcvlen, inet_ntoa(caddr.sin_addr), ntohs(caddr.sin_port));
+				}
+				else if (rcvlen == 0) {
+					OT_LOGD("Client listen connection broken\n");
+					continue;	/// Continue handle next connection
+				}
+				else {
+					OT_LOGE("recvfrom() fail: %s\n", strerror(errno));
+					continue;	/// Continue handle next connection
+				}
+				
+				s = udps_search_byfd(fd);
+				if (s == NULL) {
+					OT_LOGD("Unknown packet from %s:%d\n", inet_ntoa(raddr.sin_addr), ntohs(raddr.sin_port));
+					continue;
+				}
+				
+				/// Forward data
+				ret = sendto(lfd, rcvbuf, rcvlen, 0, (struct sockaddr*)&s->laddr, s->laddr_len);
+				if (ret == 0) {
+					OT_LOGI("Connection to target host %s:%d lost\n", inet_ntoa(s->raddr.sin_addr), ntohs(s->raddr.sin_port));
+				}
+				else if (ret < 0) {
+					OT_LOGD("sendto() fail: %s\n", strerror(errno));
+				}
+				else {
+					OT_LOGD("Sent %d bytes to target host %s:%d\n", ret, inet_ntoa(s->raddr.sin_addr), ntohs(s->raddr.sin_port));
+				}
+			}	/// End of 遍历 UDP 连接列表
+		}	/// End of 从远程主机接收数据
+	} /// End of while()
+}
+
+int ot_tunneling_udp111(int lfd) {
+	int tfd, ret;
+	struct sockaddr_in taddr;	/// Target addr
+	struct sockaddr_in caddr;	/// Client addr
 	socklen_t taddr_len;
+	socklen_t caddr_len;
 	unsigned char rcvbuf[25600];
 	ssize_t rcvlen;
 	
@@ -808,6 +987,9 @@ int ot_tunneling_udp(int lfd) {
 	taddr.sin_family = AF_INET;
 	taddr.sin_port = htons(otcfg_target_port);
 	ret = inet_aton(otcfg_target_host, &taddr.sin_addr);
+	
+	caddr_len = sizeof(caddr);
+	caddr.sin_family = AF_INET;
 	
 	/// Connect to remote
 	tfd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -817,7 +999,7 @@ int ot_tunneling_udp(int lfd) {
 	}
 	
 	ret = connect(tfd, (struct sockaddr*)&taddr, taddr_len);
-	if (ret != 0) {
+	if (ret < 0) {
 		OT_LOGE("connect() fail while connecting to target host: %s\n", strerror(errno));
 		return -2;
 	}
@@ -844,17 +1026,18 @@ int ot_tunneling_udp(int lfd) {
 			/// 收数据
 			if (otcfg_side == OT_SIDE_SERVER) {
 				/// 服务端，从远程收取
-				rcvlen = recv(lfd, rcvbuf, sizeof(rcvbuf), 0);
+				rcvlen = recvfrom(lfd, rcvbuf, sizeof(rcvbuf), 0, (struct sockaddr*)&caddr, &caddr_len);
 				OT_LOGI("Recv from client %d bytes\n", rcvlen);
 			}
 			else {
 				/// 客户端，从本地取
-				rcvlen = recv(lfd, rcvbuf, sizeof(rcvbuf), 0);
+				rcvlen = recvfrom(lfd, rcvbuf, sizeof(rcvbuf), 0, (struct sockaddr*)&caddr, &caddr_len);
 				OT_LOGI("Recv from user %d bytes\n", rcvlen);
 			}
 			
 			/// 转发数据
-			send(tfd, rcvbuf, rcvlen, 0);
+			ret = send(tfd, rcvbuf, rcvlen, 0);
+			OT_LOGD("forward -> send() %d bytes to %s:%d\n", ret, inet_ntoa(taddr.sin_addr), otcfg_target_port);
 			
 		}
 		else if (FD_ISSET(tfd, &rfds)) {
@@ -863,8 +1046,22 @@ int ot_tunneling_udp(int lfd) {
 			OT_LOGI("Recv from target %d bytes\n", rcvlen);
 			
 			/// 转发数据
-			ret = send(lfd, rcvbuf, rcvlen, 0);
-			OT_LOGI("Forwarded %d bytes to lfd\n", ret);
+			if (otcfg_side == OT_SIDE_CLIENT) {
+				/// 客户端
+				ret = sendto(lfd, rcvbuf, rcvlen, 0, (struct sockaddr*)&caddr, caddr_len);
+				OT_LOGI("Forwarded %d bytes to lfd\n", ret);
+				if (ret <= 0) {
+					OT_LOGI("Error forwarding to lfd: %s\n", strerror(errno));
+				}
+			}
+			else {
+				/// 服务端
+				ret = sendto(lfd, rcvbuf, rcvlen, 0, (struct sockaddr*)&caddr, caddr_len);
+				OT_LOGI("Forwarded %d bytes to lfd\n", ret);
+				if (ret <= 0) {
+					OT_LOGI("Error forwarding to lfd: %s\n", strerror(errno));
+				}
+			}
 		}
 		else {
 			OT_LOGE("No fd is set but select() return positive?\n");
@@ -909,7 +1106,7 @@ int ot_listen() {
 		ot_listen_tcp(fsd, lisport);
 	}
 	else if (otcfg_proto == SOCK_DGRAM) {
-		ot_tunneling_udp(fsd);
+		ot_tunneling_udp_client(fsd);
 	}
 	else {
 		OT_LOGE("Unknown protocol `%d'\n", otcfg_proto);
