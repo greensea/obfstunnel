@@ -397,18 +397,20 @@ int ot_tunneling_tcp_server(int lfd, int tfd) {
 	uint16_t paklen;
 	int readb, writeb;
 	int nfd;
-	fd_set rfds;
+	fd_set rfds, initrfds;
 	int ret;
 	void* outbuf;
 	size_t outsiz;
 	
 	nfd = (lfd > tfd) ? lfd : tfd;
 	nfd += 1;	/// select() ask nfd be the largest numbered fd, plus 1
-		
+	
+	FD_ZERO(&initrfds);
+	FD_SET(lfd, &initrfds);
+	FD_SET(tfd, &initrfds);
+	
 	while (1) {
-		FD_ZERO(&rfds);
-		FD_SET(lfd, &rfds);
-		FD_SET(tfd, &rfds);
+		rfds = initrfds;
 
 		ret = select(nfd, &rfds, NULL, NULL, NULL);
 		if (ret == -1) {
@@ -732,14 +734,12 @@ int ot_listen_tcp(int fsd, int lisport) {
 	int afd;
 	struct sockaddr_in raddr;
 	socklen_t raddrlen;
-
 	
 	ret = listen(fsd, 1);
 	if (ret < 0) {
 		perror("listen");
 		exit(-3);
 	}
-	
 	
 	while (1) {
 		//int flags;
