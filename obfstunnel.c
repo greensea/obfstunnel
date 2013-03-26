@@ -19,7 +19,6 @@
 
 /// Configuration variables to obfs core
 static int otcfg_side = 0;
-static int otcfg_proto = SOCK_STREAM;
 static unsigned short int otcfg_client_port;
 static unsigned short int otcfg_server_port;
 static unsigned short int otcfg_target_port;
@@ -68,12 +67,15 @@ int obfsem_random_init(const char* opt) {
 		
 		if (strcasecmp(subarg, "padlen") == 0) {
 			obfsvar_random_padlen = atoi(strtok_r(NULL, "=", &subsaveptr));
+			OT_LOGI("obfs random method: padlen = %d\n", obfsvar_random_padlen);
 		}
 		else if (strcasecmp(subarg, "maxlen") == 0) {
 			obfsvar_random_maxlen = atoi(strtok_r(NULL, "=", &subsaveptr));
+			OT_LOGI("obfs random method: maxlen = %d\n", obfsvar_random_maxlen);
 		}
 		else if (strcasecmp(subarg, "salt") == 0) {
 			obfsvar_random_salt = strdup(strtok_r(NULL, "=", &subsaveptr));
+			OT_LOGI("obfs random method: salt = `%s'\n", obfsvar_random_salt);
 		}
 		else if (strcasecmp(subarg, "random") == 0) {
 			/// Nothing to do
@@ -84,11 +86,6 @@ int obfsem_random_init(const char* opt) {
 	} while ((arg = strtok_r(NULL, ",", &saveptr)) != NULL);
 	
 	free(str);
-	
-	OT_LOGI("obfs random method: padlen = %d\n", obfsvar_random_padlen);
-	OT_LOGI("obfs random method: maxlen = %d\n", obfsvar_random_maxlen);
-	OT_LOGI("obfs random method: salt = `%s'\n", obfsvar_random_salt);
-
 	
 	return 0;
 }
@@ -105,6 +102,7 @@ int obfsem_random_init(const char* opt) {
 void obfsem_randomize_encode(void* in, size_t insiz, void** out, size_t* outsiz) {
 	static void* buf = NULL;
 	static uint32_t iv;
+	int r;
 	uint16_t* paklen;
 	int i, padlen, saltlen;
 	int seed = 1;	/// Random number seed for srand()
@@ -118,17 +116,11 @@ void obfsem_randomize_encode(void* in, size_t insiz, void** out, size_t* outsiz)
 	
 	saltlen = strlen(obfsvar_random_salt);
 	
-	if (obfsvar_random_padlen > 0) {
-		padlen = rand() % obfsvar_random_padlen;	/// Pad max to _padlen_ bytes to packet
-		padlen = (insiz + padlen + 4 + 2 <= obfsvar_random_maxlen) ? padlen : (obfsvar_random_maxlen - insiz - 4 -2);	/// But packet should not larger than _maxlen_
-	}
-	else {
-		padlen = 0;
-	}
+	r = rand() % obfsvar_random_padlen;	/// Pad max to _padlen_ bytes to packet
+	padlen = (insiz + r + 4 + 2 <= obfsvar_random_maxlen) ? r : (obfsvar_random_maxlen - insiz - 4 -2);		/// But packet should not larger than _maxlen_
 	if (padlen < 0) {
 		padlen = 0;
 	}
-	
 	iv = rand();
 	
 	*outsiz = 4 + 2 + insiz + padlen;
@@ -514,7 +506,7 @@ int ot_tunneling_tcp_client(int lfd, int tfd) {
 	uint16_t paklen;
 	int readb, writeb;
 	int nfd;
-	fd_set rfds, initrfds;
+	fd_set rfds;
 	int ret;
 	void* outbuf;
 	size_t outsiz;
@@ -522,12 +514,10 @@ int ot_tunneling_tcp_client(int lfd, int tfd) {
 	nfd = (lfd > tfd) ? lfd : tfd;
 	nfd += 1;	/// select() ask nfd be the largest numbered fd, plus 1
 		
-	FD_ZERO(&initrfds);
-	FD_SET(lfd, &initrfds);
-	FD_SET(tfd, &initrfds);
-		
 	while (1) {
-		rfds = initrfds;
+		FD_ZERO(&rfds);
+		FD_SET(lfd, &rfds);
+		FD_SET(tfd, &rfds);
 
 		ret = select(nfd, &rfds, NULL, NULL, NULL);
 		if (ret == -1) {
@@ -727,12 +717,37 @@ int ot_accept_client(int fd) {
 	return 0;
 }
 
-int ot_listen_tcp(int fsd, int lisport) {
-	int ret;
+int ot_listen() {
+	int fsd;
 	int afd;
+	int ret;
+	int lisport;
+	struct sockaddr_in addr;
 	struct sockaddr_in raddr;
 	socklen_t raddrlen;
-
+	
+	if (otcfg_side == OT_SIDE_SERVER) {
+		lisport = otcfg_server_port;
+	}
+	else {
+		lisport = otcfg_client_port;
+	}
+	
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons(lisport);
+	addr.sin_addr.s_addr = 0;	/// 0.0.0.0
+	
+	fsd = socket(AF_INET, SOCK_STREAM, 0);
+	if (fsd <= 0) {
+		perror("socket");
+		exit(-1);
+	}
+	
+	ret = bind(fsd, (struct sockaddr*)&addr, sizeof(addr));
+	if (ret < 0) {
+		OT_LOGE("Could not bind on address %s:%d\n", inet_ntoa(addr.sin_addr), ntohs(addr.sin_port));
+		exit(-2);
+	}
 	
 	ret = listen(fsd, 1);
 	if (ret < 0) {
@@ -793,129 +808,6 @@ int ot_listen_tcp(int fsd, int lisport) {
 	}
 	
 	close(fsd);
-	
-	return 0;
-}
-
-int ot_tunneling_udp(int lfd) {
-	int tfd, ret;
-	struct sockaddr_in taddr;
-	socklen_t taddr_len;
-	unsigned char rcvbuf[25600];
-	ssize_t rcvlen;
-	
-	taddr_len = sizeof(taddr);
-	taddr.sin_family = AF_INET;
-	taddr.sin_port = htons(otcfg_target_port);
-	ret = inet_aton(otcfg_target_host, &taddr.sin_addr);
-	
-	/// Connect to remote
-	tfd = socket(AF_INET, SOCK_DGRAM, 0);
-	if (tfd < 0) {
-		OT_LOGE("socket() fail while connecting to target host: %s\n", strerror(errno));
-		return -1;
-	}
-	
-	ret = connect(tfd, (struct sockaddr*)&taddr, taddr_len);
-	if (ret != 0) {
-		OT_LOGE("connect() fail while connecting to target host: %s\n", strerror(errno));
-		return -2;
-	}
-	
-	
-	while (1) {
-		fd_set rfds;
-		
-		FD_ZERO(&rfds);
-		FD_SET(lfd, &rfds);
-		FD_SET(tfd, &rfds);
-
-		ret = select(1024, &rfds, NULL, NULL, NULL);
-		if (ret == -1) {
-			OT_LOGE("select() error: %s\n", strerror(errno));
-			return -1;
-		}
-		else if (ret == 0) {
-			OT_LOGW("select() timed out\n");
-			continue;
-		}
-		
-		if (FD_ISSET(lfd, &rfds)) {
-			/// 收数据
-			if (otcfg_side == OT_SIDE_SERVER) {
-				/// 服务端，从远程收取
-				rcvlen = recv(lfd, rcvbuf, sizeof(rcvbuf), 0);
-				OT_LOGI("Recv from client %d bytes\n", rcvlen);
-			}
-			else {
-				/// 客户端，从本地取
-				rcvlen = recv(lfd, rcvbuf, sizeof(rcvbuf), 0);
-				OT_LOGI("Recv from user %d bytes\n", rcvlen);
-			}
-			
-			/// 转发数据
-			send(tfd, rcvbuf, rcvlen, 0);
-			
-		}
-		else if (FD_ISSET(tfd, &rfds)) {
-			/// 收数据
-			rcvlen = recv(tfd, rcvbuf, sizeof(rcvbuf), 0);
-			OT_LOGI("Recv from target %d bytes\n", rcvlen);
-			
-			/// 转发数据
-			ret = send(lfd, rcvbuf, rcvlen, 0);
-			OT_LOGI("Forwarded %d bytes to lfd\n", ret);
-		}
-		else {
-			OT_LOGE("No fd is set but select() return positive?\n");
-			return -2;
-		}
-	}
-	
-	return 0;
-}
-
-int ot_listen() {
-	int fsd;
-	int ret;
-	int lisport;
-	struct sockaddr_in addr;
-	
-	if (otcfg_side == OT_SIDE_SERVER) {
-		lisport = otcfg_server_port;
-	}
-	else {
-		lisport = otcfg_client_port;
-	}
-	
-	addr.sin_family = AF_INET;
-	addr.sin_port = htons(lisport);
-	addr.sin_addr.s_addr = 0;	/// 0.0.0.0
-	
-	fsd = socket(AF_INET, otcfg_proto, 0);
-	if (fsd <= 0) {
-		perror("socket");
-		exit(-1);
-	}
-	
-	ret = bind(fsd, (struct sockaddr*)&addr, sizeof(addr));
-	if (ret < 0) {
-		OT_LOGE("Could not bind on address %s:%d\n", inet_ntoa(addr.sin_addr), ntohs(addr.sin_port));
-		exit(-2);
-	}
-
-
-	if (otcfg_proto == SOCK_STREAM) {
-		ot_listen_tcp(fsd, lisport);
-	}
-	else if (otcfg_proto == SOCK_DGRAM) {
-		ot_tunneling_udp(fsd);
-	}
-	else {
-		OT_LOGE("Unknown protocol `%d'\n", otcfg_proto);
-	}
-	
-	return 0;
 }
 
 /**
@@ -980,11 +872,7 @@ int main(int argc, char* argv[]) {
 		exit(0);
 	}
 	
-	/// Parse arguments
-	
-	otcfg_proto = SOCK_STREAM;	/// Default to TCP protocol
-	
-	while ((opt = getopt(argc, argv, "s:t:c:m:uh")) != -1) {
+	while ((opt = getopt(argc, argv, "s:t:c:m:h")) != -1) {
 		char* t;
 		char tstr2[1024];
 		
@@ -1050,15 +938,10 @@ int main(int argc, char* argv[]) {
 				
 				
 				break;
-			
-			case 'u':
-				otcfg_proto = SOCK_DGRAM;
-				OT_LOGD("Use UDP protocol\n");
-				break;
-			
+				
 			case 'h':
 			default:
-				fprintf(stderr, "Usage: %s <<-s|-c> port> [-t <domain|IP>[:port]] [-u]\n", argv[0]);
+				fprintf(stderr, "Usage: %s <<-s|-c> port> [-t <domain|IP>[:port]]\n", argv[0]);
 				exit(0);
 				break;
 		}
