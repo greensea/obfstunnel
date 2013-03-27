@@ -33,9 +33,10 @@ We are in machine A, and wants to SSH to server B, but we can not direct
 connect to server B via SSH because a firewall is block SSH connection.
 obfstunnel can help us.
 
-We will use obfstunnel builtin obfs method, the random method. The
-random method could make traffic like random traffic, so firewall could
-not detect SSH connection and could not block it.
+We will use obfstunnel builtin obfs method, the xor method. It just XOR
+every byte with 0xFF. There is another builtin obfs method which name is 
+random method. The random method could make traffic like random traffic,
+so firewall could not detect SSH connection and could not block it.
 
 On server side, or server B, we run obfstunnel like this:
 
