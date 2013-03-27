@@ -834,8 +834,9 @@ struct sockaddr_in addr_parse(char* ip, int port) {
 int ot_tunneling_udp(int lfd) {
 	fd_set initfds;
 	fd_set rfds;
-	int fd, nfds, ret, rcvlen;
+	int fd, nfds, ret, rcvlen, buflen;
 	unsigned char rcvbuf[65535];	/// Maxinum of UDP packet size is 65535
+	void* buf;
 	udp_session_t* s;
 	struct sockaddr_in caddr;	/// Client address
 	struct sockaddr_in raddr;	/// Remote host address
@@ -959,8 +960,20 @@ int ot_tunneling_udp(int lfd) {
 			}
 			
 			/// UDP session exists, or has been added
+			
+			/// Encode or decode data
+			if (otcfg_side == OT_SIDE_SERVER) {
+				/// Decode
+				obfsem_decode(rcvbuf, rcvlen, &buf, &buflen);
+			}
+			else {
+				/// Encode
+				obfsem_encode(rcvbuf, rcvlen, &buf, &buflen);
+			}
+			
+			/// Forwar data
 			s->atime = curtime;
-			ret = sendto(s->fd, rcvbuf, rcvlen, 0, (struct sockaddr*)&s->raddr, s->raddr_len);
+			ret = sendto(s->fd, buf, buflen, 0, (struct sockaddr*)&s->raddr, s->raddr_len);
 			if (ret == 0) {
 				OT_LOGI("Connection to target host %s:%d lost\n", inet_ntoa(s->raddr.sin_addr), ntohs(s->raddr.sin_port));
 			}
@@ -997,10 +1010,20 @@ int ot_tunneling_udp(int lfd) {
 				OT_LOGD("Unknown packet from %s:%d\n", inet_ntoa(raddr.sin_addr), ntohs(raddr.sin_port));
 				continue;
 			}
-			
+
+			/// Encode or decode data
+			if (otcfg_side == OT_SIDE_SERVER) {
+				/// Encode
+				obfsem_encode(rcvbuf, rcvlen, &buf, &buflen);
+			}
+			else {
+				/// Decode
+				obfsem_decode(rcvbuf, rcvlen, &buf, &buflen);
+			}
+
 			/// Forward data
 			s->atime = curtime;
-			ret = sendto(lfd, rcvbuf, rcvlen, 0, (struct sockaddr*)&s->laddr, s->laddr_len);
+			ret = sendto(lfd, buf, buflen, 0, (struct sockaddr*)&s->laddr, s->laddr_len);
 			if (ret == 0) {
 				OT_LOGI("Connection to target host %s:%d lost\n", inet_ntoa(s->laddr.sin_addr), ntohs(s->laddr.sin_port));
 			}
@@ -1124,7 +1147,7 @@ int main(int argc, char* argv[]) {
 	
 	otcfg_proto = SOCK_STREAM;	/// Default to TCP protocol
 	
-	while ((opt = getopt(argc, argv, "s:t:c:m:u:h")) != -1) {
+	while ((opt = getopt(argc, argv, "s:t:c:m:u::h")) != -1) {
 		char* t;
 		char tstr2[1024];
 		
