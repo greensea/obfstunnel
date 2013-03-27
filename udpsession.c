@@ -97,6 +97,8 @@ int udps_cleanup(int ttl) {
 		if (curtime - p->atime > ttl) {
 			n++;
 			
+			OT_LOGD("curtime - p->atime = %d - %d = %d, s->fd=%d, ttl=%d\n", (int)curtime, (int)p->atime, (int)(curtime - p->atime), p->fd, ttl);
+			
 			// <!> Shutdown fds
 			shutdown(p->fd, SHUT_RDWR);
 			close(p->fd);
@@ -140,7 +142,10 @@ int udps_fdset(fd_set* fds) {
 	FD_ZERO(fds);
 	
 	for (p = udps_head; p != NULL; p = p->next) {
-		n++;
+		if (p->fd > n) {
+			n = p->fd;
+		}
+		
 		FD_SET(p->fd, fds);
 	}
 	
