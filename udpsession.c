@@ -2,6 +2,7 @@
 #include <string.h>
 #include <arpa/inet.h>
 
+#include "obfstunnel.h"
 #include "udpsession.h"
 
 udp_session_t* udps_head = NULL;
@@ -69,7 +70,7 @@ int udps_delete(udp_session_t* sess) {
 		/// Search the prev node of *sess
 		for (p = udps_head; p->next != sess; p = p->next) {
 			if (p == NULL) {
-				OT_DEBUG("No udp session %08X found\n");
+				OT_LOGD("No udp session %08X found\n", (unsigned int)sess);
 				return -1;
 			}
 		}
@@ -81,4 +82,67 @@ int udps_delete(udp_session_t* sess) {
 	return 0;
 }
 
+/// Search timed out UDP sessions and delete them
+int udps_cleanup(int ttl) {
+	udp_session_t* p;
+	udp_session_t* prev;
+	time_t curtime;
+	int n = 0;
+	
+	curtime = time(NULL);
+	
+	p = udps_head;
+	prev = NULL;
+	while (p != NULL) {
+		if (curtime - p->atime > ttl) {
+			n++;
+			
+			// <!> Shutdown fds
+			shutdown(p->fd, SHUT_RDWR);
+			close(p->fd);
+			
+			if (prev == NULL) {
+				udps_head = p->next;
+				free(p);
+				p = udps_head;
+			}
+			else {
+				prev->next = p->next;
+				free(p);
+				p = prev->next;
+			}
+			
+		}
+		else {
+			prev = p;
+			p = p->next;
+		}
+	}
+	
+	OT_LOGD("Deleted %d timeout nodes\n", n);
+	
+	return 0;
+}
 
+/**
+ * Rebuild fdset corresponding to current UDP sessions
+ * 
+ * @return int	Max number of fd
+ */
+int udps_fdset(fd_set* fds) {
+	int n = -1;
+	udp_session_t* p;
+	
+	if (fds == NULL) {
+		return -1;
+	}
+	
+	FD_ZERO(fds);
+	
+	for (p = udps_head; p != NULL; p = p->next) {
+		n++;
+		FD_SET(p->fd, fds);
+	}
+	
+	return n;
+}

@@ -25,6 +25,7 @@ static unsigned short int otcfg_client_port;
 static unsigned short int otcfg_server_port;
 static unsigned short int otcfg_target_port;
 static char otcfg_target_host[1024] = {0};
+static int otcfg_udp_ttl = 120;
 
 
 /// Function pointers to obfs methods
@@ -818,6 +819,7 @@ struct sockaddr_in addr_parse(char* ip, int port) {
 		ipstr = dns_query(ip, NULL);
 		if (ipstr == NULL) {
 			OT_LOGE("Could not resolve domain `%s'\n", otcfg_target_host);
+			return taddr;
 		}
 		else {
 			OT_LOGI("Resolved domain: %s --> %s\n", otcfg_target_host, ipstr);
@@ -829,7 +831,7 @@ struct sockaddr_in addr_parse(char* ip, int port) {
 	return taddr;
 }
 
-int ot_tunneling_udp_client(int lfd) {
+int ot_tunneling_udp(int lfd) {
 	fd_set initfds;
 	fd_set rfds;
 	int fd, nfds, ret, rcvlen;
@@ -839,6 +841,10 @@ int ot_tunneling_udp_client(int lfd) {
 	struct sockaddr_in raddr;	/// Remote host address
 	socklen_t raddr_len;
 	socklen_t caddr_len;
+	time_t curtime, gctime;
+	struct timeval to;
+	
+	gctime = time(NULL);
 	
 	/// 1. Waiting client data or server data
 	/// 2. Tunneling data
@@ -855,20 +861,50 @@ int ot_tunneling_udp_client(int lfd) {
 	nfds = lfd;
 	
 	while (1) {
+		/// Cleaning up timed out UDP sessions
+		if (time(NULL) - gctime > otcfg_udp_ttl) {
+			udps_cleanup(otcfg_udp_ttl);
+			gctime = time(NULL);
+
+			///Rebuild fdset
+			nfds = udps_fdset(&initfds);
+			FD_SET(lfd, &initfds);
+			if (lfd > nfds) {
+				nfds = lfd;
+			}
+		}
+
 		rfds = initfds;
+		to.tv_sec = otcfg_udp_ttl + 1;
+		to.tv_usec = 0;
 		
-		ret = select(nfds + 1, &rfds, NULL, NULL, NULL);
+		ret = select(nfds + 1, &rfds, NULL, NULL, &to);
 		if (ret == -1) {
 			OT_LOGE("select() error: %s\n", strerror(errno));
 			return -1;
 		}
 		else if (ret == 0) {
-			OT_LOGW("select() timed out\n");
+			OT_LOGD("select() timed out\n");
+			
+			udps_cleanup(otcfg_udp_ttl);
+			gctime = time(NULL);
+			
+			///Rebuild fdset
+			nfds = udps_fdset(&initfds);
+			FD_SET(lfd, &initfds);
+			if (lfd > nfds) {
+				nfds = lfd;
+			}
+			
 			continue;
 		}
 		
+		curtime = time(NULL);
+		
 		if (FD_ISSET(lfd, &rfds)) {
 			/// 在监听端口收到数据
+			memset(&caddr, 0x00, sizeof(caddr));
+			caddr_len = sizeof(caddr);
 			rcvlen = recvfrom(lfd, rcvbuf, sizeof(rcvbuf), 0, (struct sockaddr*)&caddr, &caddr_len);
 			if (rcvlen > 0) {
 				OT_LOGD("Recived %d bytes from client %s:%d\n", rcvlen, inet_ntoa(caddr.sin_addr), ntohs(caddr.sin_port));
@@ -879,6 +915,7 @@ int ot_tunneling_udp_client(int lfd) {
 			}
 			else {
 				OT_LOGE("recvfrom() fail: %s\n", strerror(errno));
+				continue;
 			}
 			
 			s = udps_search_byladdr(caddr);
@@ -902,6 +939,9 @@ int ot_tunneling_udp_client(int lfd) {
 					OT_LOGE("connect() fail while connecting to target host: %s\n", strerror(errno));
 					continue;
 				}
+				else {
+					OT_LOGI("Connect to %s:%d in UDP\n", inet_ntoa(stmp.raddr.sin_addr), ntohs(stmp.raddr.sin_port));
+				}
 				
 				/// Add to UDP session
 				s = udps_add(stmp);
@@ -917,160 +957,63 @@ int ot_tunneling_udp_client(int lfd) {
 				}
 				FD_SET(stmp.fd, &initfds);
 			}
+			
+			/// UDP session exists, or has been added
+			s->atime = curtime;
+			ret = sendto(s->fd, rcvbuf, rcvlen, 0, (struct sockaddr*)&s->raddr, s->raddr_len);
+			if (ret == 0) {
+				OT_LOGI("Connection to target host %s:%d lost\n", inet_ntoa(s->raddr.sin_addr), ntohs(s->raddr.sin_port));
+			}
+			else if (ret < 0) {
+				OT_LOGD("sendto() fail: %s\n", strerror(errno));
+			}
 			else {
-				/// UDP session exists
-				ret = sendto(s->fd, rcvbuf, rcvlen, 0, (struct sockaddr*)&s->raddr, s->raddr_len);
-				if (ret == 0) {
-					OT_LOGI("Connection to target host %s:%d lost\n", inet_ntoa(s->raddr.sin_addr), ntohs(s->raddr.sin_port));
-				}
-				else if (ret < 0) {
-					OT_LOGD("sendto() fail: %s\n", strerror(errno));
-				}
-				else {
-					OT_LOGD("Sent %d bytes to target host %s:%d\n", ret, inet_ntoa(s->raddr.sin_addr), ntohs(s->raddr.sin_port));
-				}
+				OT_LOGD("Sent %d bytes to target host %s:%d\n", ret, inet_ntoa(s->raddr.sin_addr), ntohs(s->raddr.sin_port));
 			}
 		}
-		else {
-			/// 从远程主机收到数据
-			for (fd = 0; ret <= nfds; fd++) {	/// FIXME: Should traverse UDP session rather than such bruce
-				if (!FD_ISSET(fd, &rfds) || fd == lfd) {
-					continue;
-				}
-				
-				raddr_len = sizeof(raddr);
-				rcvlen = recvfrom(fd, rcvbuf, sizeof(rcvbuf), 0, (struct sockaddr*)&raddr, &raddr_len);
-				if (rcvlen > 0) {
-					OT_LOGD("Recived %d bytes from client %s:%d\n", rcvlen, inet_ntoa(caddr.sin_addr), ntohs(caddr.sin_port));
-				}
-				else if (rcvlen == 0) {
-					OT_LOGD("Client listen connection broken\n");
-					continue;	/// Continue handle next connection
-				}
-				else {
-					OT_LOGE("recvfrom() fail: %s\n", strerror(errno));
-					continue;	/// Continue handle next connection
-				}
-				
-				s = udps_search_byfd(fd);
-				if (s == NULL) {
-					OT_LOGD("Unknown packet from %s:%d\n", inet_ntoa(raddr.sin_addr), ntohs(raddr.sin_port));
-					continue;
-				}
-				
-				/// Forward data
-				ret = sendto(lfd, rcvbuf, rcvlen, 0, (struct sockaddr*)&s->laddr, s->laddr_len);
-				if (ret == 0) {
-					OT_LOGI("Connection to target host %s:%d lost\n", inet_ntoa(s->raddr.sin_addr), ntohs(s->raddr.sin_port));
-				}
-				else if (ret < 0) {
-					OT_LOGD("sendto() fail: %s\n", strerror(errno));
-				}
-				else {
-					OT_LOGD("Sent %d bytes to target host %s:%d\n", ret, inet_ntoa(s->raddr.sin_addr), ntohs(s->raddr.sin_port));
-				}
-			}	/// End of 遍历 UDP 连接列表
-		}	/// End of 从远程主机接收数据
+
+		/// 从远程主机收到数据
+		for (fd = 0; fd <= 1024; fd++) {	/// FIXME: Should traverse UDP session rather than such bruce
+			if (!FD_ISSET(fd, &rfds) || fd == lfd) {
+				continue;
+			}
+			
+			raddr_len = sizeof(raddr);
+			rcvlen = recvfrom(fd, rcvbuf, sizeof(rcvbuf), 0, (struct sockaddr*)&raddr, &raddr_len);
+			if (rcvlen > 0) {
+				OT_LOGD("Recived %d bytes from remote %s:%d\n", rcvlen, inet_ntoa(raddr.sin_addr), ntohs(raddr.sin_port));
+			}
+			else if (rcvlen == 0) {
+				OT_LOGD("Remote connection broken\n");
+				continue;	/// Continue handle next connection
+			}
+			else {
+				OT_LOGE("recvfrom() fail: %s\n", strerror(errno));
+				continue;	/// Continue handle next connection
+			}
+			
+			s = udps_search_byfd(fd);
+			if (s == NULL) {
+				OT_LOGD("Unknown packet from %s:%d\n", inet_ntoa(raddr.sin_addr), ntohs(raddr.sin_port));
+				continue;
+			}
+			
+			/// Forward data
+			s->atime = curtime;
+			ret = sendto(lfd, rcvbuf, rcvlen, 0, (struct sockaddr*)&s->laddr, s->laddr_len);
+			if (ret == 0) {
+				OT_LOGI("Connection to target host %s:%d lost\n", inet_ntoa(s->laddr.sin_addr), ntohs(s->laddr.sin_port));
+			}
+			else if (ret < 0) {
+				OT_LOGD("sendto() fail: %s\n", strerror(errno));
+			}
+			else {
+				OT_LOGD("Sent %d bytes to client host %s:%d\n", ret, inet_ntoa(s->laddr.sin_addr), ntohs(s->laddr.sin_port));
+			}
+		}	/// End of 遍历 UDP 连接列表
 	} /// End of while()
 }
 
-int ot_tunneling_udp111(int lfd) {
-	int tfd, ret;
-	struct sockaddr_in taddr;	/// Target addr
-	struct sockaddr_in caddr;	/// Client addr
-	socklen_t taddr_len;
-	socklen_t caddr_len;
-	unsigned char rcvbuf[25600];
-	ssize_t rcvlen;
-	
-	taddr_len = sizeof(taddr);
-	taddr.sin_family = AF_INET;
-	taddr.sin_port = htons(otcfg_target_port);
-	ret = inet_aton(otcfg_target_host, &taddr.sin_addr);
-	
-	caddr_len = sizeof(caddr);
-	caddr.sin_family = AF_INET;
-	
-	/// Connect to remote
-	tfd = socket(AF_INET, SOCK_DGRAM, 0);
-	if (tfd < 0) {
-		OT_LOGE("socket() fail while connecting to target host: %s\n", strerror(errno));
-		return -1;
-	}
-	
-	ret = connect(tfd, (struct sockaddr*)&taddr, taddr_len);
-	if (ret < 0) {
-		OT_LOGE("connect() fail while connecting to target host: %s\n", strerror(errno));
-		return -2;
-	}
-	
-	
-	while (1) {
-		fd_set rfds;
-		
-		FD_ZERO(&rfds);
-		FD_SET(lfd, &rfds);
-		FD_SET(tfd, &rfds);
-
-		ret = select(1024, &rfds, NULL, NULL, NULL);
-		if (ret == -1) {
-			OT_LOGE("select() error: %s\n", strerror(errno));
-			return -1;
-		}
-		else if (ret == 0) {
-			OT_LOGW("select() timed out\n");
-			continue;
-		}
-		
-		if (FD_ISSET(lfd, &rfds)) {
-			/// 收数据
-			if (otcfg_side == OT_SIDE_SERVER) {
-				/// 服务端，从远程收取
-				rcvlen = recvfrom(lfd, rcvbuf, sizeof(rcvbuf), 0, (struct sockaddr*)&caddr, &caddr_len);
-				OT_LOGI("Recv from client %d bytes\n", rcvlen);
-			}
-			else {
-				/// 客户端，从本地取
-				rcvlen = recvfrom(lfd, rcvbuf, sizeof(rcvbuf), 0, (struct sockaddr*)&caddr, &caddr_len);
-				OT_LOGI("Recv from user %d bytes\n", rcvlen);
-			}
-			
-			/// 转发数据
-			ret = send(tfd, rcvbuf, rcvlen, 0);
-			OT_LOGD("forward -> send() %d bytes to %s:%d\n", ret, inet_ntoa(taddr.sin_addr), otcfg_target_port);
-			
-		}
-		else if (FD_ISSET(tfd, &rfds)) {
-			/// 收数据
-			rcvlen = recv(tfd, rcvbuf, sizeof(rcvbuf), 0);
-			OT_LOGI("Recv from target %d bytes\n", rcvlen);
-			
-			/// 转发数据
-			if (otcfg_side == OT_SIDE_CLIENT) {
-				/// 客户端
-				ret = sendto(lfd, rcvbuf, rcvlen, 0, (struct sockaddr*)&caddr, caddr_len);
-				OT_LOGI("Forwarded %d bytes to lfd\n", ret);
-				if (ret <= 0) {
-					OT_LOGI("Error forwarding to lfd: %s\n", strerror(errno));
-				}
-			}
-			else {
-				/// 服务端
-				ret = sendto(lfd, rcvbuf, rcvlen, 0, (struct sockaddr*)&caddr, caddr_len);
-				OT_LOGI("Forwarded %d bytes to lfd\n", ret);
-				if (ret <= 0) {
-					OT_LOGI("Error forwarding to lfd: %s\n", strerror(errno));
-				}
-			}
-		}
-		else {
-			OT_LOGE("No fd is set but select() return positive?\n");
-			return -2;
-		}
-	}
-	
-	return 0;
-}
 
 int ot_listen() {
 	int fsd;
@@ -1106,7 +1049,7 @@ int ot_listen() {
 		ot_listen_tcp(fsd, lisport);
 	}
 	else if (otcfg_proto == SOCK_DGRAM) {
-		ot_tunneling_udp_client(fsd);
+		ot_tunneling_udp(fsd);
 	}
 	else {
 		OT_LOGE("Unknown protocol `%d'\n", otcfg_proto);
@@ -1181,7 +1124,7 @@ int main(int argc, char* argv[]) {
 	
 	otcfg_proto = SOCK_STREAM;	/// Default to TCP protocol
 	
-	while ((opt = getopt(argc, argv, "s:t:c:m:uh")) != -1) {
+	while ((opt = getopt(argc, argv, "s:t:c:m:u:h")) != -1) {
 		char* t;
 		char tstr2[1024];
 		
@@ -1250,12 +1193,24 @@ int main(int argc, char* argv[]) {
 			
 			case 'u':
 				otcfg_proto = SOCK_DGRAM;
-				OT_LOGD("Use UDP protocol\n");
+				if (optarg == NULL) {
+					otcfg_udp_ttl = 120;
+				}
+				else {
+					otcfg_udp_ttl = atoi(optarg);
+				}
+				if (otcfg_udp_ttl <= 0) {
+					otcfg_udp_ttl = 120;
+				}
+				
+				OT_LOGI("Use UDP protocol\n");
+				OT_LOGI("UDP connection live time set to %d seconds\n", otcfg_udp_ttl);
+				
 				break;
 			
 			case 'h':
 			default:
-				fprintf(stderr, "Usage: %s <<-s|-c> port> [-t <domain|IP>[:port]] [-u]\n", argv[0]);
+				fprintf(stderr, "Usage: %s <<-s|-c> port> [-t <domain|IP>[:port]] [-u [timeout]]\n", argv[0]);
 				exit(0);
 				break;
 		}
