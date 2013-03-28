@@ -26,6 +26,7 @@ static unsigned short int otcfg_server_port;
 static unsigned short int otcfg_target_port;
 static char otcfg_target_host[1024] = {0};
 static int otcfg_udp_ttl = 120;
+int otcfg_log_level = OT_LOGLEVEL_INFO;
 
 
 /// Function pointers to obfs methods
@@ -1138,6 +1139,7 @@ int obfs_usemethod(char* method) {
 int main(int argc, char* argv[]) {
 	int opt;
 	int ret;
+	int i;
 	
 	if (argc < 2) {
 		fprintf(stderr, "Type `%s -h' for help\n", argv[0]);
@@ -1148,7 +1150,7 @@ int main(int argc, char* argv[]) {
 	
 	otcfg_proto = SOCK_STREAM;	/// Default to TCP protocol
 	
-	while ((opt = getopt(argc, argv, "s:t:c:m:u::h")) != -1) {
+	while ((opt = getopt(argc, argv, "s:t:c:m:u::v::h")) != -1) {
 		char* t;
 		char tstr2[1024];
 		
@@ -1229,6 +1231,16 @@ int main(int argc, char* argv[]) {
 				
 				OT_LOGI("Use UDP protocol\n");
 				OT_LOGI("UDP connection live time set to %d seconds\n", otcfg_udp_ttl);
+				
+				break;
+			
+			case 'v':
+				otcfg_log_level++;
+				if (optarg != NULL) {
+					for (i = 0; optarg[i] != 0x00; i++) {
+						otcfg_log_level++;
+					}
+				}
 				
 				break;
 			
