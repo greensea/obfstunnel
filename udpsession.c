@@ -1,6 +1,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <arpa/inet.h>
+#include <time.h>
+#include <unistd.h>
 
 #include "obfstunnel.h"
 #include "udpsession.h"

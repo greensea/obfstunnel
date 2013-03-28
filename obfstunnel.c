@@ -47,7 +47,7 @@ uint8_t obfsvar_xor_mask = 0xff;
 int obfsem_random_init(const char* opt) {
 	char* str;
 	char* arg;
-	char* saveptr;
+	char* saveptr = NULL;
 	
 	if (opt == NULL) {
 		return -1;
@@ -64,7 +64,7 @@ int obfsem_random_init(const char* opt) {
 	arg = strtok_r(str, ",", &saveptr);
 	do {
 		char* subarg;
-		char* subsaveptr;
+		char* subsaveptr = NULL;
 
 		subarg = strtok_r(arg, "=", &subsaveptr);
 		
@@ -834,7 +834,8 @@ struct sockaddr_in addr_parse(char* ip, int port) {
 int ot_tunneling_udp(int lfd) {
 	fd_set initfds;
 	fd_set rfds;
-	int fd, nfds, ret, rcvlen, buflen;
+	int fd, nfds, ret, rcvlen;
+	size_t buflen;
 	unsigned char rcvbuf[65535];	/// Maxinum of UDP packet size is 65535
 	void* buf;
 	udp_session_t* s;

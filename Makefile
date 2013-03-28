@@ -1,7 +1,10 @@
-all : obfstunnel.c obfstunnel.h udpsession.c
-	gcc obfstunnel.c udpsession.c -O2 -o obfstunnel
+CC=gcc
+CFLAGS=-O2 -Wall
 
-install : all
+all : obfstunnel.c obfstunnel.h udpsession.c udpsession.h
+	gcc obfstunnel.c udpsession.c -o obfstunnel $(CFLAGS)
+
+install : obfstunnel
 	cp obfstunnel /usr/bin/ -v
 
 clean : 
