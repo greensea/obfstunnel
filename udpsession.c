@@ -61,6 +61,7 @@ udp_session_t* udps_add(udp_session_t sess) {
  * 
  * @return int	0 for success, negative for fail
  */
+/*
 int udps_delete(udp_session_t* sess) {
 	udp_session_t* p;
 	
@@ -83,6 +84,7 @@ int udps_delete(udp_session_t* sess) {
 	
 	return 0;
 }
+*/
 
 /// Search timed out UDP sessions and delete them
 int udps_cleanup(int ttl) {

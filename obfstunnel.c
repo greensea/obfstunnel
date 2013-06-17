@@ -727,9 +727,10 @@ int ot_accept_client(int fd) {
 	/// 转发
 	ot_tunneling_tcp(fd, tfd);
 	
-	
 	shutdown(fd, SHUT_RDWR);
 	shutdown(tfd, SHUT_RDWR);
+	
+	close(tfd);
 	
 	return 0;
 }
@@ -794,6 +795,7 @@ int ot_listen_tcp(int fsd, int lisport) {
 		}
 		else {
 			wait(NULL);
+			close(afd);
 		}
 	}
 	
