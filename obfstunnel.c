@@ -109,10 +109,8 @@ void obfsem_randomize_encode(void* in, size_t insiz, void** out, size_t* outsiz)
 	static void* buf = NULL;
 	static uint32_t iv;
 	uint16_t* paklen;
-	int i, padlen, saltlen;
+	int i, padlen;
 	int seed = 1;	/// Random number seed for srand()
-	
-	saltlen = 0;
 
 	if (seed == 1) {
 		struct timeval tv;
@@ -120,8 +118,6 @@ void obfsem_randomize_encode(void* in, size_t insiz, void** out, size_t* outsiz)
 		seed = tv.tv_usec;
 		srand(seed);
 	}
-	
-	saltlen = strlen(obfsvar_random_salt);
 	
 	if (obfsvar_random_padlen > 0) {
 		padlen = rand() % obfsvar_random_padlen;	/// Pad max to _padlen_ bytes to packet
@@ -168,10 +164,8 @@ void obfsem_randomize_encode(void* in, size_t insiz, void** out, size_t* outsiz)
 
 void obfsem_randomize_decode(void* in, size_t insiz, void** out, size_t* outsiz) {
 	static void* buf = NULL;
-	int i, saltlen;
+	int i;
 	uint16_t paklen;
-	
-	saltlen = strlen(obfsvar_random_salt);
 	
 	/// Read payload length and decode it
 	memcpy(&paklen, in + 4, 2);
