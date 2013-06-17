@@ -112,6 +112,8 @@ void obfsem_randomize_encode(void* in, size_t insiz, void** out, size_t* outsiz)
 	int i, padlen, saltlen;
 	int seed = 1;	/// Random number seed for srand()
 	
+	saltlen = 0;
+
 	if (seed == 1) {
 		struct timeval tv;
 		gettimeofday(&tv, NULL);
