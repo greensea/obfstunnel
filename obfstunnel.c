@@ -725,7 +725,6 @@ int ot_accept_client(int fd) {
 	/// 转发
 	ot_tunneling_tcp(fd, tfd);
 	
-	OT_LOGE("fd=%d, tfd=%d\n", fd, tfd);
 	shutdown(fd, SHUT_RDWR);
 	shutdown(tfd, SHUT_RDWR);
 	
