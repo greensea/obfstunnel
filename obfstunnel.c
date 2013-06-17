@@ -729,6 +729,8 @@ int ot_accept_client(int fd) {
 	shutdown(fd, SHUT_RDWR);
 	shutdown(tfd, SHUT_RDWR);
 	
+	close(tfd);
+	
 	return 0;
 }
 
