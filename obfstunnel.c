@@ -1067,7 +1067,7 @@ int ot_listen() {
 	
 	ret = bind(fsd, (struct sockaddr*)&addr, sizeof(addr));
 	if (ret < 0) {
-		OT_LOGE("Could not bind on address %s:%d\n", inet_ntoa(addr.sin_addr), ntohs(addr.sin_port));
+		OT_LOGE("Could not bind on address %s:%d: %s\n", inet_ntoa(addr.sin_addr), ntohs(addr.sin_port), strerror(errno));
 		exit(-2);
 	}
 
