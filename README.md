@@ -17,11 +17,11 @@ connected to localhost, obfstunnel will encode traffic and send to
 obfstunnel on SERVER side. On SERVER side, obfstunnel will connect to
 target host which user wants to, and forward user traffic.
 
-<pre>
+```
                              firewall
 [user] <----> [obfstunnel] <---||---> [obfstunnel] <----> [target host]
-       direct                do_obfs               direct
-</pre>
+       direct              obfuscating               direct
+```
 
 
 
