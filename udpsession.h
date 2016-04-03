@@ -1,4 +1,5 @@
 #include <arpa/inet.h>
+#include <sys/select.h>
 
 typedef struct udp_session_t {
 	int fd;
